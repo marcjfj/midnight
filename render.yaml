@@ -3,7 +3,6 @@ services:
   - type: web
     name: midnight-server
     runtime: node
-    plan: starter # Or your desired plan
     repo: https://github.com/marcjfj/midnight # Replace with your repo URL
     rootDir: server
     buildCommand: "npm install" # No build step needed for this simple server
@@ -16,7 +15,6 @@ services:
   - type: web
     name: midnight-client
     runtime: static
-    plan: starter # Or your desired plan
     repo: https://github.com/marcjfj/midnight # Replace with your repo URL
     rootDir: client
     buildCommand: "npm install && npm run build"
