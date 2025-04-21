@@ -1,0 +1,34 @@
+services:
+  # Backend Node.js Server
+  - type: web
+    name: midnight-server
+    runtime: node
+    plan: free # Or your desired plan
+    repo: https://github.com/<your-github-username>/<your-repo-name> # Replace with your repo URL
+    rootDir: server
+    buildCommand: "npm install" # No build step needed for this simple server
+    startCommand: "npm start"
+    envVars:
+      - key: NODE_VERSION
+        value: 20 # Or your desired Node version
+
+  # Frontend React Client (Static Site)
+  - type: web
+    name: midnight-client
+    plan: free # Or your desired plan
+    repo: https://github.com/<your-github-username>/<your-repo-name> # Replace with your repo URL
+    rootDir: client
+    buildCommand: "npm install && npm run build"
+    startCommand: "npx serve -s dist -p $PORT" # Serve static files from dist
+    envVars:
+      - key: NODE_VERSION
+        value: 20 # Or your desired Node version
+      - key: VITE_SOCKET_URL # Pass the server URL to the client build
+        fromService:
+          type: web
+          name: midnight-server
+          envVarKey: RENDER_EXTERNAL_URL
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
