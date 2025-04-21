@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from "react";
 import { useParams } from "react-router-dom";
-import socketIOClient from "socket.io-client"; // Assuming the actual socket instance is created elsewhere and passed
 import DiceArea from "./DiceArea";
 import Controls from "./Controls";
 import PlayersScoreboard from "./PlayersScoreboard";

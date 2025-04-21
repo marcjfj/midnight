@@ -1,12 +1,6 @@
 import { useState, useEffect } from "react";
 import { Routes, Route, useNavigate } from "react-router-dom";
 import socketIOClient from "socket.io-client";
-import type { Socket } from "socket.io-client";
-// Keep game-related component imports for the Room component later
-// import DiceArea from "./components/DiceArea";
-// import Controls from "./components/Controls";
-// import PlayerList from "./components/PlayerList";
-// import Scoreboard from "./components/Scoreboard";
 import Room from "./components/Room"; // Import the new Room component
 
 // Define shared types (could be moved to a types file)
