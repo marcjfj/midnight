@@ -202,7 +202,7 @@ app.post("/api/create-room", (req, res) => {
 
 // Serve static files from the React app build directory
 // This assumes the client build output is in 'client/dist' relative to the server directory
-app.use(express.static(path.join(__dirname, "../client/dist")));
+app.use(express.static(path.join(__dirname, "client/dist")));
 
 io.on("connection", (socket: Socket) => {
   console.log("a user connected:", socket.id);
@@ -552,7 +552,7 @@ io.on("connection", (socket: Socket) => {
 // All other GET requests not handled before will return the React app
 // This is important for client-side routing
 app.get("*", (req, res) => {
-  res.sendFile(path.join(__dirname, "../client/dist", "index.html"));
+  res.sendFile(path.join(__dirname, "client/dist", "index.html"));
 });
 
 server.listen(PORT, () => {
