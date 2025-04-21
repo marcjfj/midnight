@@ -15,11 +15,12 @@ services:
   # Frontend React Client (Static Site)
   - type: web
     name: midnight-client
+    runtime: static
     plan: free # Or your desired plan
     repo: https://github.com/marcjfj/midnight # Replace with your repo URL
     rootDir: client
     buildCommand: "npm install && npm run build"
-    startCommand: "npx serve -s dist -p $PORT" # Serve static files from dist
+    staticPublishPath: "./dist"
     envVars:
       - key: NODE_VERSION
         value: 20 # Or your desired Node version
