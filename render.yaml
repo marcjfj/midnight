@@ -4,7 +4,7 @@ services:
     name: midnight-server
     runtime: node
     plan: free # Or your desired plan
-    repo: https://github.com/<your-github-username>/<your-repo-name> # Replace with your repo URL
+    repo: https://github.com/marcjfj/midnight # Replace with your repo URL
     rootDir: server
     buildCommand: "npm install" # No build step needed for this simple server
     startCommand: "npm start"
@@ -16,7 +16,7 @@ services:
   - type: web
     name: midnight-client
     plan: free # Or your desired plan
-    repo: https://github.com/<your-github-username>/<your-repo-name> # Replace with your repo URL
+    repo: https://github.com/marcjfj/midnight # Replace with your repo URL
     rootDir: client
     buildCommand: "npm install && npm run build"
     startCommand: "npx serve -s dist -p $PORT" # Serve static files from dist
