@@ -150,10 +150,10 @@ async function saveGameState(roomId: string, state: GameState): Promise<void> {
       state.playersPlayedThisRound = Array.from(state.playersPlayedThisRound);
     }
     const stateString = JSON.stringify(state);
-    await redis.set(`room:${roomId}`, stateString);
-    console.log(`[saveGameState] Successfully saved state for room: ${roomId}`);
-    // Consider setting an expiration (TTL) for rooms if needed, e.g., 24 hours
-    // await redis.expire(`room:${roomId}`, 60 * 60 * 24);
+    
+    // Use setex to set the value with a TTL of 24 hours (86400 seconds)
+    await redis.setex(`room:${roomId}`, 86400, stateString);
+    console.log(`[saveGameState] Successfully saved state for room: ${roomId} with 24h TTL`);
   } catch (error) {
     console.error(
       `[saveGameState] Failed to save state for room ${roomId}:`,
@@ -597,6 +597,30 @@ io.on("connection", (socket: Socket) => {
       `[joinRoom] User ${socket.id} attempting to join room: ${roomId} as ${playerName}`
     );
 
+    // CRITICAL DEBUG: Direct check of the specific room key
+    try {
+      const directCheck = await redis.exists(`room:${roomId}`);
+      console.log(`[joinRoom] DIRECT CHECK: Key 'room:${roomId}' exists in Redis: ${directCheck === 1 ? 'YES' : 'NO'}`);
+      
+      if (directCheck === 0) {
+        // If key doesn't exist, try to check when it was last seen
+        const ttl = await redis.ttl(`room:${roomId}`);
+        console.log(`[joinRoom] DIRECT CHECK: TTL for key 'room:${roomId}': ${ttl}`);
+        
+        // Try to dump all keys for debugging
+        try {
+          console.log(`[joinRoom] DUMPING ALL REDIS KEYS for debug:`);
+          const allKeys = await redis.keys('*');
+          console.log(`[joinRoom] Found ${allKeys.length} total keys in Redis`);
+          allKeys.forEach(key => console.log(`[joinRoom] Found key: ${key}`));
+        } catch (err) {
+          console.error(`[joinRoom] Error dumping all Redis keys:`, err);
+        }
+      }
+    } catch (err) {
+      console.error(`[joinRoom] Error doing direct key check:`, err);
+    }
+    
     // Log all currently available rooms in Redis (for debugging only)
     try {
       const roomsKeys = await redis.keys("room:*");
@@ -614,21 +638,32 @@ io.on("connection", (socket: Socket) => {
     console.log(`[joinRoom] Attempting initial fetch for room: ${roomId}`);
     let roomState = await getGameState(roomId); // <-- Get from Redis
 
-    // Retry logic: If room not found, wait briefly and try again
-    if (!roomState) {
+    // Enhanced retry logic: Try up to 3 times with increasing delays
+    const MAX_RETRIES = 3;
+    let retryCount = 0;
+    
+    while (!roomState && retryCount < MAX_RETRIES) {
+      retryCount++;
+      const delayMs = retryCount * 1000; // 1s, 2s, 3s
+      
       console.log(
-        `[joinRoom] Room ${roomId} not found initially for ${socket.id}. Retrying once after delay...`
+        `[joinRoom] Room ${roomId} not found for ${socket.id}. Retry ${retryCount}/${MAX_RETRIES} after ${delayMs}ms delay...`
       );
-      await new Promise((resolve) => setTimeout(resolve, 1000)); // Wait 1000ms (1 second)
-      // --- Retry Fetch ---
-      console.log(`[joinRoom] Attempting retry fetch for room: ${roomId}`);
-      roomState = await getGameState(roomId); // Try fetching again
+      
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      console.log(`[joinRoom] Attempting retry fetch ${retryCount} for room: ${roomId}`);
+      roomState = await getGameState(roomId);
+      
+      // If we found it on a retry, log this fact
+      if (roomState) {
+        console.log(`[joinRoom] Successfully found room ${roomId} on retry attempt ${retryCount}`);
+      }
     }
 
     if (!roomState) {
-      // Handle invalid room ID after retry
+      // Handle invalid room ID after retries
       console.error(
-        `[joinRoom] Room ${roomId} still not found for ${socket.id} after retry. Emitting error.`
+        `[joinRoom] Room ${roomId} still not found for ${socket.id} after ${MAX_RETRIES} retries. Emitting error.`
       );
       socket.emit("error", { message: "Room not found" });
       return;
@@ -824,45 +859,4 @@ io.on("connection", (socket: Socket) => {
       roomState.roundWinner = roundWinner;
 
       console.log(
-        `Round ended in room ${roomId}. Winner: ${roundWinner || "Tie"}`
-      );
-
-      // Save state before broadcasting round end
-      await saveGameState(roomId, roomState); // <-- Save state
-      // Broadcast the updated state with round end information
-      io.to(roomId).emit("gameStateUpdate", roomState);
-      return;
-    }
-
-    // If the round hasn't ended, advance to the next player in the room
-    const nextPlayer = getNextPlayer(roomState); // Pass state directly
-    roomState.currentPlayer = nextPlayer;
-    if (nextPlayer) {
-      resetTurnState(roomState); // Pass state directly
-      console.log(`Turn advanced to player ${nextPlayer} in room ${roomId}`);
-    } else {
-      // This case should ideally not happen if round end is checked correctly,
-      // but handle defensively.
-      roomState.currentPlayer = null;
-      console.log(
-        `Error: No next player found, but round not ended in room ${roomId}.`
-      );
-      // Consider resetting the round or logging more info.
-    }
-
-    // Save the updated state *to Redis*
-    await saveGameState(roomId, roomState); // <-- Save state
-    // Broadcast the updated state *to the room*
-    io.to(roomId).emit("gameStateUpdate", roomState);
-  });
-});
-
-// All other GET requests not handled before will return the React app
-// This is important for client-side routing
-app.get("*", (req, res) => {
-  res.sendFile(path.join(__dirname, "../../client/dist", "index.html"));
-});
-
-server.listen(PORT, () => {
-  console.log(`Server listening on *:${PORT}`);
-});
+        `

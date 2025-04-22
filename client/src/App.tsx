@@ -140,9 +140,16 @@ function Home() {
         );
         // Store roomId in localStorage for debugging purposes
         localStorage.setItem("lastCreatedRoomId", roomId);
-        // Navigate to the new room URL
-        console.log(`[handleCreateRoom] Navigating to /room/${roomId}`);
-        navigate(`/room/${roomId}`);
+
+        // Add a small delay to ensure Redis has processed the room creation fully
+        console.log(
+          `[handleCreateRoom] Waiting 1 second before navigating to ensure Redis processing completes...`
+        );
+        setTimeout(() => {
+          // Navigate to the new room URL
+          console.log(`[handleCreateRoom] Navigating to /room/${roomId}`);
+          navigate(`/room/${roomId}`);
+        }, 1000); // 1 second delay
       } else {
         throw new Error("Failed to get room ID from server");
       }
