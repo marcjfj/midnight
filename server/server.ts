@@ -150,10 +150,12 @@ async function saveGameState(roomId: string, state: GameState): Promise<void> {
       state.playersPlayedThisRound = Array.from(state.playersPlayedThisRound);
     }
     const stateString = JSON.stringify(state);
-    
+
     // Use setex to set the value with a TTL of 24 hours (86400 seconds)
     await redis.setex(`room:${roomId}`, 86400, stateString);
-    console.log(`[saveGameState] Successfully saved state for room: ${roomId} with 24h TTL`);
+    console.log(
+      `[saveGameState] Successfully saved state for room: ${roomId} with 24h TTL`
+    );
   } catch (error) {
     console.error(
       `[saveGameState] Failed to save state for room ${roomId}:`,
@@ -600,19 +602,25 @@ io.on("connection", (socket: Socket) => {
     // CRITICAL DEBUG: Direct check of the specific room key
     try {
       const directCheck = await redis.exists(`room:${roomId}`);
-      console.log(`[joinRoom] DIRECT CHECK: Key 'room:${roomId}' exists in Redis: ${directCheck === 1 ? 'YES' : 'NO'}`);
-      
+      console.log(
+        `[joinRoom] DIRECT CHECK: Key 'room:${roomId}' exists in Redis: ${
+          directCheck === 1 ? "YES" : "NO"
+        }`
+      );
+
       if (directCheck === 0) {
         // If key doesn't exist, try to check when it was last seen
         const ttl = await redis.ttl(`room:${roomId}`);
-        console.log(`[joinRoom] DIRECT CHECK: TTL for key 'room:${roomId}': ${ttl}`);
-        
+        console.log(
+          `[joinRoom] DIRECT CHECK: TTL for key 'room:${roomId}': ${ttl}`
+        );
+
         // Try to dump all keys for debugging
         try {
           console.log(`[joinRoom] DUMPING ALL REDIS KEYS for debug:`);
-          const allKeys = await redis.keys('*');
+          const allKeys = await redis.keys("*");
           console.log(`[joinRoom] Found ${allKeys.length} total keys in Redis`);
-          allKeys.forEach(key => console.log(`[joinRoom] Found key: ${key}`));
+          allKeys.forEach((key) => console.log(`[joinRoom] Found key: ${key}`));
         } catch (err) {
           console.error(`[joinRoom] Error dumping all Redis keys:`, err);
         }
@@ -620,7 +628,7 @@ io.on("connection", (socket: Socket) => {
     } catch (err) {
       console.error(`[joinRoom] Error doing direct key check:`, err);
     }
-    
+
     // Log all currently available rooms in Redis (for debugging only)
     try {
       const roomsKeys = await redis.keys("room:*");
@@ -641,22 +649,26 @@ io.on("connection", (socket: Socket) => {
     // Enhanced retry logic: Try up to 3 times with increasing delays
     const MAX_RETRIES = 3;
     let retryCount = 0;
-    
+
     while (!roomState && retryCount < MAX_RETRIES) {
       retryCount++;
       const delayMs = retryCount * 1000; // 1s, 2s, 3s
-      
+
       console.log(
         `[joinRoom] Room ${roomId} not found for ${socket.id}. Retry ${retryCount}/${MAX_RETRIES} after ${delayMs}ms delay...`
       );
-      
+
       await new Promise((resolve) => setTimeout(resolve, delayMs));
-      console.log(`[joinRoom] Attempting retry fetch ${retryCount} for room: ${roomId}`);
+      console.log(
+        `[joinRoom] Attempting retry fetch ${retryCount} for room: ${roomId}`
+      );
       roomState = await getGameState(roomId);
-      
+
       // If we found it on a retry, log this fact
       if (roomState) {
-        console.log(`[joinRoom] Successfully found room ${roomId} on retry attempt ${retryCount}`);
+        console.log(
+          `[joinRoom] Successfully found room ${roomId} on retry attempt ${retryCount}`
+        );
       }
     }
 
@@ -859,4 +871,18 @@ io.on("connection", (socket: Socket) => {
       roomState.roundWinner = roundWinner;
 
       console.log(
-        `
+        `Round ended in room ${roomId}. Winner: ${roundWinner || "Tie"}`
+      );
+
+      // Save state before broadcasting round end
+      await saveGameState(roomId, roomState); // <-- Save state
+      // Broadcast the updated state with round end information
+      io.to(roomId).emit("gameStateUpdate", roomState);
+      return;
+    }
+  });
+});
+
+server.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+});
