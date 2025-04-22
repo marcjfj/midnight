@@ -542,7 +542,7 @@ io.on("connection", (socket: Socket) => {
       console.log(
         `[joinRoom] Room ${roomId} not found initially for ${socket.id}. Retrying once after delay...`
       );
-      await new Promise((resolve) => setTimeout(resolve, 250)); // Wait 250ms
+      await new Promise((resolve) => setTimeout(resolve, 1000)); // Wait 1000ms (1 second)
       // --- Retry Fetch ---
       console.log(`[joinRoom] Attempting retry fetch for room: ${roomId}`);
       roomState = await getGameState(roomId); // Try fetching again
