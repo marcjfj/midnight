@@ -81,6 +81,11 @@ function Room({ socket }: RoomProps) {
   useEffect(() => {
     if (!isNameSet || !roomId || !playerName) {
       // Don't connect or join until name is set and roomId is available
+      console.log("Join effect dependency not ready:", {
+        isNameSet,
+        roomId,
+        playerName,
+      });
       return;
     }
 
