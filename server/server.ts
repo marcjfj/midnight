@@ -71,26 +71,55 @@ redis.on("error", (err) => {
 
 // Helper function to get game state from Redis
 async function getGameState(roomId: string): Promise<GameState | null> {
+  console.log(`[getGameState] Attempting to get state for room: ${roomId}`);
   const stateString = await redis.get(`room:${roomId}`); // Use prefix for clarity
   if (!stateString) {
+    console.log(`[getGameState] No state found in Redis for room: ${roomId}`);
     return null;
   }
-  const state = JSON.parse(stateString) as GameState;
-  // Ensure playersPlayedThisRound is always an array (handles potential old data)
-  state.playersPlayedThisRound = state.playersPlayedThisRound || [];
-  return state;
+  console.log(`[getGameState] Found state string for room: ${roomId}`);
+  try {
+    const state = JSON.parse(stateString) as GameState;
+    // Ensure playersPlayedThisRound is always an array (handles potential old data)
+    state.playersPlayedThisRound = state.playersPlayedThisRound || [];
+    console.log(`[getGameState] Successfully parsed state for room: ${roomId}`);
+    return state;
+  } catch (error) {
+    console.error(
+      `[getGameState] Failed to parse state for room ${roomId}:`,
+      error
+    );
+    console.error(`[getGameState] Corrupted state string: ${stateString}`);
+    // Decide how to handle corruption, e.g., delete the key?
+    // await deleteGameState(roomId);
+    return null; // Return null if parsing fails
+  }
 }
 
 // Helper function to save game state to Redis
 async function saveGameState(roomId: string, state: GameState): Promise<void> {
-  // Ensure playersPlayedThisRound is an array before saving
-  if (state.playersPlayedThisRound instanceof Set) {
-    console.warn(`Converting Set to array for storage in room ${roomId}`);
-    state.playersPlayedThisRound = Array.from(state.playersPlayedThisRound);
+  console.log(`[saveGameState] Attempting to save state for room: ${roomId}`);
+  try {
+    // Ensure playersPlayedThisRound is an array before saving
+    if (state.playersPlayedThisRound instanceof Set) {
+      console.warn(
+        `[saveGameState] Converting Set to array for storage in room ${roomId}`
+      );
+      state.playersPlayedThisRound = Array.from(state.playersPlayedThisRound);
+    }
+    const stateString = JSON.stringify(state);
+    await redis.set(`room:${roomId}`, stateString);
+    console.log(`[saveGameState] Successfully saved state for room: ${roomId}`);
+    // Consider setting an expiration (TTL) for rooms if needed, e.g., 24 hours
+    // await redis.expire(`room:${roomId}`, 60 * 60 * 24);
+  } catch (error) {
+    console.error(
+      `[saveGameState] Failed to save state for room ${roomId}:`,
+      error
+    );
+    // Rethrow or handle as appropriate for the application context
+    throw error;
   }
-  await redis.set(`room:${roomId}`, JSON.stringify(state));
-  // Consider setting an expiration (TTL) for rooms if needed, e.g., 24 hours
-  // await redis.expire(`room:${roomId}`, 60 * 60 * 24);
 }
 
 // Helper function to delete game state from Redis
@@ -241,13 +270,25 @@ app.use(express.json());
 // Endpoint to create a new game room
 app.post("/api/create-room", async (req, res) => {
   const roomId = uuidv4(); // Generate a unique room ID
+  console.log(
+    `[/api/create-room] Request received, generated roomId: ${roomId}`
+  );
   const initialState = createInitialGameState();
   try {
+    console.log(
+      `[/api/create-room] Attempting to save initial state for room: ${roomId}`
+    );
     await saveGameState(roomId, initialState); // <-- Save to Redis
-    console.log(`Room created and saved to Redis: ${roomId}`);
+    console.log(
+      `[/api/create-room] Successfully saved initial state for room: ${roomId}`
+    );
     res.json({ roomId }); // Send the new room ID back to the client
   } catch (error) {
-    console.error(`Failed to create room ${roomId} in Redis:`, error);
+    // Log the specific error from saveGameState if it throws
+    console.error(
+      `[/api/create-room] Failed to save initial state for room ${roomId}:`,
+      error
+    );
     res.status(500).json({ message: "Failed to create room" });
   }
 });
@@ -488,28 +529,43 @@ io.on("connection", (socket: Socket) => {
   });
 
   socket.on("joinRoom", async (roomId: string, playerName: string) => {
+    console.log(
+      `[joinRoom] User ${socket.id} attempting to join room: ${roomId} as ${playerName}`
+    );
+
+    // --- Initial Fetch ---
+    console.log(`[joinRoom] Attempting initial fetch for room: ${roomId}`);
     let roomState = await getGameState(roomId); // <-- Get from Redis
 
     // Retry logic: If room not found, wait briefly and try again
     if (!roomState) {
       console.log(
-        `Room ${roomId} not found initially for ${socket.id}. Retrying once after delay...`
+        `[joinRoom] Room ${roomId} not found initially for ${socket.id}. Retrying once after delay...`
       );
       await new Promise((resolve) => setTimeout(resolve, 250)); // Wait 250ms
+      // --- Retry Fetch ---
+      console.log(`[joinRoom] Attempting retry fetch for room: ${roomId}`);
       roomState = await getGameState(roomId); // Try fetching again
     }
 
     if (!roomState) {
       // Handle invalid room ID after retry
-      socket.emit("error", { message: "Room not found" });
-      console.log(
-        `Socket ${socket.id} tried to join non-existent room ${roomId} (even after retry)`
+      console.error(
+        `[joinRoom] Room ${roomId} still not found for ${socket.id} after retry. Emitting error.`
       );
+      socket.emit("error", { message: "Room not found" });
       return;
     }
 
+    console.log(
+      `[joinRoom] Successfully fetched state for room: ${roomId}. Proceeding with join.`
+    );
+
     // Join the Socket.IO room
     socket.join(roomId);
+    console.log(
+      `[joinRoom] Socket ${socket.id} joined Socket.IO room: ${roomId}`
+    );
 
     // Add player to the room's state using the provided name
     const safePlayerName = playerName?.trim()
@@ -530,29 +586,44 @@ io.on("connection", (socket: Socket) => {
     // Add player to player order if not already in it
     if (!roomState.playerOrder.includes(socket.id)) {
       roomState.playerOrder.push(socket.id);
+      console.log(
+        `[joinRoom] Added ${socket.id} to playerOrder for room: ${roomId}`
+      );
     }
 
     // If this is the first player joining this specific room, make it their turn
     if (!roomState.currentPlayer) {
       roomState.currentPlayer = socket.id;
       resetTurnState(roomState); // Pass state directly
+      console.log(
+        `[joinRoom] Set ${socket.id} as currentPlayer for room: ${roomId}`
+      );
     }
 
     console.log(
-      `Socket ${socket.id} (${safePlayerName}) joined room ${roomId}`
+      `[joinRoom] Attempting to save updated state after player join for room: ${roomId}`
     );
-
     // Save the updated state *to Redis*
     await saveGameState(roomId, roomState);
+    console.log(
+      `[joinRoom] Successfully saved updated state after player join for room: ${roomId}`
+    );
 
     // Send the current room state to the newly joined client
     socket.emit("gameStateUpdate", roomState);
+    console.log(
+      `[joinRoom] Emitted gameStateUpdate to joining socket ${socket.id}`
+    );
 
     // Broadcast the updated room state to everyone in the room
     io.to(roomId).emit("gameStateUpdate", roomState); // Send full state
+    console.log(`[joinRoom] Broadcasted gameStateUpdate to room ${roomId}`);
 
     // Store the room ID on the socket data
     socket.data = { ...socket.data, roomId: roomId };
+    console.log(
+      `[joinRoom] Stored roomId ${roomId} in socket data for ${socket.id}`
+    );
   });
 
   // Make playAgain handler async for Redis operations
