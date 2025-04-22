@@ -7,6 +7,7 @@ import { Server, Socket } from "socket.io";
 import path from "path";
 import { v4 as uuidv4 } from "uuid";
 import Redis from "ioredis";
+import { createAdapter } from "@socket.io/redis-adapter";
 
 // Define types for game state
 interface Player {
@@ -38,14 +39,6 @@ interface SocketData {
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: "*", // Allow all origins for now, restrict in production
-    methods: ["GET", "POST"],
-  },
-});
-
-const PORT = process.env.PORT || 3001;
 
 // --- Redis Initialization ---
 // Render provides the connection string via REDIS_URL
@@ -62,6 +55,8 @@ console.log(
 );
 
 const redis = new Redis(redisUrl);
+// Create a duplicate Redis client for the Socket.IO adapter
+const redisForSocketIO = new Redis(redisUrl);
 
 redis.on("connect", () => {
   console.log("[Redis] Successfully connected to Redis");
@@ -89,6 +84,21 @@ redis.on("error", (err) => {
   // Consider how to handle runtime errors - maybe attempt reconnect or shutdown gracefully
 });
 // --- End Redis Initialization ---
+
+// Create Socket.IO server with Redis adapter for multiple instances
+const io = new Server(server, {
+  cors: {
+    origin: "*", // Allow all origins for now, restrict in production
+    methods: ["GET", "POST"],
+  },
+  adapter: createAdapter(redis, redisForSocketIO),
+});
+
+console.log(
+  "[Socket.IO] Created server with Redis adapter for multiple instances support"
+);
+
+const PORT = process.env.PORT || 3001;
 
 // --- Game State Management ---
 // Remove the in-memory rooms object
@@ -689,6 +699,12 @@ io.on("connection", (socket: Socket) => {
     socket.join(roomId);
     console.log(
       `[joinRoom] Socket ${socket.id} joined Socket.IO room: ${roomId}`
+    );
+
+    // Log the socket count in the room for debugging
+    const sockets = await io.in(roomId).fetchSockets();
+    console.log(
+      `[joinRoom] Room ${roomId} now has ${sockets.length} socket(s) connected`
     );
 
     // Add player to the room's state using the provided name
