@@ -125,9 +125,16 @@ const PlayersScoreboard: React.FC<PlayersScoreboardProps> = ({
                     </span>
                   )}
                 </div>
-                <span className="font-bold text-xl text-lime-300 tabular-nums">
-                  {score}
-                </span>
+                <div className="flex flex-col items-end">
+                  <span className="font-bold text-xl text-lime-300 tabular-nums">
+                    {score}
+                  </span>
+                  {roundScores[id] > 0 && (
+                    <span className="text-xs text-yellow-300">
+                      +{roundScores[id]} this round
+                    </span>
+                  )}
+                </div>
               </li>
             );
           })
