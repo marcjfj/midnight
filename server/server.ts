@@ -1,8 +1,12 @@
+import dotenv from "dotenv";
+dotenv.config(); // Load .env file
+
 import express from "express";
 import http from "http";
 import { Server, Socket } from "socket.io";
 import path from "path";
 import { v4 as uuidv4 } from "uuid";
+import Redis from "ioredis";
 
 // Define types for game state
 interface Player {
@@ -22,7 +26,7 @@ interface GameState {
   mustKeepDie: boolean;
   isRolling: boolean;
   playerOrder: string[];
-  playersPlayedThisRound: Set<string>;
+  playersPlayedThisRound: string[];
   roundEnded: boolean;
   roundWinner: string | null;
 }
@@ -43,9 +47,56 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3001;
 
+// --- Redis Initialization ---
+// Render provides the connection string via REDIS_URL
+const redisUrl = process.env.REDIS_URL;
+if (!redisUrl) {
+  console.error("REDIS_URL environment variable not set!");
+  process.exit(1); // Exit if Redis isn't configured
+}
+const redis = new Redis(redisUrl);
+
+redis.on("connect", () => {
+  console.log("Connected to Redis");
+});
+redis.on("error", (err) => {
+  console.error("Redis connection error:", err);
+  // Consider how to handle runtime errors - maybe attempt reconnect or shutdown gracefully
+});
+// --- End Redis Initialization ---
+
 // --- Game State Management ---
-// Store game states for multiple rooms, keyed by roomId
-const rooms: Record<string, GameState> = {};
+// Remove the in-memory rooms object
+// const rooms: Record<string, GameState> = {}; // <-- REMOVE THIS LINE
+
+// Helper function to get game state from Redis
+async function getGameState(roomId: string): Promise<GameState | null> {
+  const stateString = await redis.get(`room:${roomId}`); // Use prefix for clarity
+  if (!stateString) {
+    return null;
+  }
+  const state = JSON.parse(stateString) as GameState;
+  // Ensure playersPlayedThisRound is always an array (handles potential old data)
+  state.playersPlayedThisRound = state.playersPlayedThisRound || [];
+  return state;
+}
+
+// Helper function to save game state to Redis
+async function saveGameState(roomId: string, state: GameState): Promise<void> {
+  // Ensure playersPlayedThisRound is an array before saving
+  if (state.playersPlayedThisRound instanceof Set) {
+    console.warn(`Converting Set to array for storage in room ${roomId}`);
+    state.playersPlayedThisRound = Array.from(state.playersPlayedThisRound);
+  }
+  await redis.set(`room:${roomId}`, JSON.stringify(state));
+  // Consider setting an expiration (TTL) for rooms if needed, e.g., 24 hours
+  // await redis.expire(`room:${roomId}`, 60 * 60 * 24);
+}
+
+// Helper function to delete game state from Redis
+async function deleteGameState(roomId: string): Promise<void> {
+  await redis.del(`room:${roomId}`);
+}
 
 // Function to create the initial state for a new game room
 function createInitialGameState(): GameState {
@@ -61,7 +112,7 @@ function createInitialGameState(): GameState {
     mustKeepDie: false, // Player must keep a die after rolling to roll again
     isRolling: false, // <-- Add isRolling state
     playerOrder: [], // Track player order
-    playersPlayedThisRound: new Set<string>(), // Track which players have played in the current round
+    playersPlayedThisRound: [], // <-- Initialize as empty array
     roundEnded: false, // Track if the round has ended
     roundWinner: null, // Track the round winner
     // Add room-specific properties if needed later
@@ -69,8 +120,7 @@ function createInitialGameState(): GameState {
 }
 
 // Helper function to get the next player *within a room*
-function getNextPlayer(roomId: string): string | null {
-  const roomState = rooms[roomId];
+function getNextPlayer(roomState: GameState): string | null {
   if (!roomState) return null;
 
   // If using player order array
@@ -100,8 +150,7 @@ function getNextPlayer(roomId: string): string | null {
 }
 
 // Helper function to reset turn state *within a room*
-function resetTurnState(roomId: string): void {
-  const roomState = rooms[roomId];
+function resetTurnState(roomState: GameState): void {
   if (!roomState) return;
   roomState.dice = [0, 0, 0, 0, 0, 0];
   roomState.keptDice = [false, false, false, false, false, false];
@@ -111,20 +160,16 @@ function resetTurnState(roomId: string): void {
 }
 
 // Helper function to check if a round has ended
-function checkRoundEnd(roomId: string): boolean {
-  const roomState = rooms[roomId];
+function checkRoundEnd(roomState: GameState): boolean {
   if (!roomState) return false;
 
-  // If all players have played their turn, the round has ended
-  return (
-    roomState.playersPlayedThisRound.size >=
-    Object.keys(roomState.players).length
-  );
+  // Convert array back to Set for size comparison logic
+  const playedSet = new Set(roomState.playersPlayedThisRound);
+  return playedSet.size >= Object.keys(roomState.players).length;
 }
 
 // Helper function to determine the round winner
-function determineRoundWinner(roomId: string): string | null {
-  const roomState = rooms[roomId];
+function determineRoundWinner(roomState: GameState): string | null {
   if (!roomState) return null;
 
   let highestScore = -1;
@@ -144,13 +189,13 @@ function determineRoundWinner(roomId: string): string | null {
 }
 
 // Helper function to start a new round
-function startNewRound(roomId: string): void {
-  const roomState = rooms[roomId];
+async function startNewRound(roomId: string): Promise<void> {
+  const roomState = await getGameState(roomId);
   if (!roomState) return;
 
   // Reset round-specific state
   roomState.roundEnded = false;
-  roomState.playersPlayedThisRound = new Set<string>();
+  roomState.playersPlayedThisRound = []; // Reset to empty array
   roomState.roundScores = {};
 
   // Reset cumulative scores for all players
@@ -180,7 +225,10 @@ function startNewRound(roomId: string): void {
   }
 
   // Reset turn state for the new round
-  resetTurnState(roomId);
+  resetTurnState(roomState); // Pass state directly
+
+  // Save the updated state back to Redis
+  await saveGameState(roomId, roomState);
 }
 
 // --- End Game State Management ---
@@ -191,11 +239,17 @@ app.use(express.json());
 // --- API Endpoints ---
 
 // Endpoint to create a new game room
-app.post("/api/create-room", (req, res) => {
+app.post("/api/create-room", async (req, res) => {
   const roomId = uuidv4(); // Generate a unique room ID
-  rooms[roomId] = createInitialGameState();
-  console.log(`Room created: ${roomId}`);
-  res.json({ roomId }); // Send the new room ID back to the client
+  const initialState = createInitialGameState();
+  try {
+    await saveGameState(roomId, initialState); // <-- Save to Redis
+    console.log(`Room created and saved to Redis: ${roomId}`);
+    res.json({ roomId }); // Send the new room ID back to the client
+  } catch (error) {
+    console.error(`Failed to create room ${roomId} in Redis:`, error);
+    res.status(500).json({ message: "Failed to create room" });
+  }
 });
 
 // --- End API Endpoints ---
@@ -207,47 +261,85 @@ app.use(express.static(path.join(__dirname, "../../client/dist")));
 io.on("connection", (socket: Socket) => {
   console.log("a user connected:", socket.id);
 
-  socket.on("disconnect", () => {
+  socket.on("disconnect", async () => {
     console.log("user disconnected:", socket.id);
 
     // Use the stored roomId from socket data
     const roomId = (socket.data as SocketData).roomId;
 
-    if (roomId && rooms[roomId]) {
-      const roomState = rooms[roomId];
-      delete roomState.players[socket.id];
-      delete roomState.scores[socket.id];
+    if (roomId) {
+      const roomState = await getGameState(roomId); // <-- Get from Redis
+      if (roomState) {
+        const wasCurrentPlayer = roomState.currentPlayer === socket.id;
 
-      // If the disconnected player was the current player, advance the turn in that room
-      if (roomState.currentPlayer === socket.id) {
-        const nextPlayer = getNextPlayer(roomId);
-        roomState.currentPlayer = nextPlayer;
-        if (nextPlayer) {
-          resetTurnState(roomId);
-        } else {
-          // Handle game end or reset if no players left in the room
-          roomState.currentPlayer = null;
-          console.log(`No players left in room ${roomId}.`);
-          // Optionally delete the room after some inactivity?
-          // delete rooms[roomId];
+        // Remove player data
+        delete roomState.players[socket.id];
+        delete roomState.scores[socket.id];
+        delete roomState.roundScores[socket.id]; // Also remove from round scores
+        roomState.playerOrder = roomState.playerOrder.filter(
+          (id) => id !== socket.id
+        );
+        // Remove from playersPlayedThisRound array if present
+        const playedIndex = roomState.playersPlayedThisRound.indexOf(socket.id);
+        if (playedIndex > -1) {
+          roomState.playersPlayedThisRound.splice(playedIndex, 1);
         }
+
+        // If the disconnected player was the current player, advance the turn
+        if (wasCurrentPlayer) {
+          const nextPlayer = getNextPlayer(roomState); // Pass state directly
+          roomState.currentPlayer = nextPlayer;
+          if (nextPlayer) {
+            resetTurnState(roomState); // Pass state directly
+          } else {
+            // Handle game end or reset if no players left in the room
+            roomState.currentPlayer = null;
+            console.log(`No players left in room ${roomId}.`);
+            // Optionally delete the room after some inactivity?
+            // await deleteGameState(roomId); // <-- Delete from Redis if needed
+          }
+        }
+
+        // Check if any players remain
+        if (Object.keys(roomState.players).length > 0) {
+          // Save the updated state back to Redis
+          await saveGameState(roomId, roomState); // <-- Save to Redis
+          // Broadcast the updated state *to that specific room*
+          io.to(roomId).emit("gameStateUpdate", roomState);
+        } else {
+          // No players left, delete the room from Redis
+          console.log(`Deleting empty room ${roomId} from Redis.`);
+          await deleteGameState(roomId); // <-- Delete from Redis
+        }
+      } else {
+        console.log(
+          `Room ${roomId} not found in Redis during disconnect for socket ${socket.id}.`
+        );
       }
-      // Broadcast the updated state *to that specific room*
-      io.to(roomId).emit("gameStateUpdate", roomState);
     }
   });
 
-  socket.on("rollDice", () => {
+  socket.on("rollDice", async () => {
     // Use the stored roomId from socket data
     const roomId = (socket.data as SocketData).roomId;
-    if (!roomId || !rooms[roomId]) {
+    if (!roomId) {
       console.error(
-        `Cannot roll dice: Socket ${socket.id} not in a valid room.`
+        `Cannot roll dice: Socket ${socket.id} not associated with a room.`
       );
+      return; // No room associated
+    }
+
+    const roomState = await getGameState(roomId); // <-- Get from Redis
+    if (!roomState) {
+      console.error(
+        `Cannot roll dice: Room ${roomId} not found in Redis for socket ${socket.id}.`
+      );
+      // Maybe emit an error to the client?
+      socket.emit("error", {
+        message: "Game room data not found. Please rejoin.",
+      });
       return;
     }
-    const roomState = rooms[roomId];
-
     if (socket.id !== roomState.currentPlayer) {
       console.log(
         `Player ${socket.id} tried to roll out of turn in room ${roomId}.`
@@ -277,50 +369,72 @@ io.on("connection", (socket: Socket) => {
 
     // --- Start Rolling State ---
     roomState.isRolling = true;
+    // Save state before emitting to show rolling animation immediately
+    await saveGameState(roomId, roomState); // <-- Save rolling state
     // Emit update to start animation on clients
     io.to(roomId).emit("gameStateUpdate", roomState);
     // --- End Start Rolling State ---
 
-    // Simulate roll delay (optional, but makes animation visible)
-    // In a real scenario, the time between setting isRolling true/false
-    // might be very short without an artificial delay.
-    // Adjust delay as needed.
-    setTimeout(() => {
+    // Simulate roll delay
+    setTimeout(async () => {
+      // <-- Add async to timeout callback
+      // Re-fetch state in case something changed during the delay
+      const currentState = await getGameState(roomId);
+      if (
+        !currentState ||
+        currentState.currentPlayer !== socket.id ||
+        !currentState.isRolling
+      ) {
+        console.log(
+          `Roll cancelled for ${socket.id} in room ${roomId} due to state change during delay.`
+        );
+        return; // State changed, abort the roll result
+      }
+
       // Roll only the dice that are not kept
       for (let i = 0; i < 6; i++) {
-        if (!roomState.keptDice[i]) {
-          roomState.dice[i] = Math.floor(Math.random() * 6) + 1;
+        if (!currentState.keptDice[i]) {
+          currentState.dice[i] = Math.floor(Math.random() * 6) + 1;
         }
       }
-      roomState.rollCount++;
-      roomState.mustKeepDie = true; // Set flag: Player must keep a die now
-      roomState.isRolling = false; // <-- Set rolling to false *after* roll
+      currentState.rollCount++;
+      currentState.mustKeepDie = true; // Set flag: Player must keep a die now
+      currentState.isRolling = false; // <-- Set rolling to false *after* roll
 
-      // TODO: Add check for BUST here (no scoring dice available on this roll)
-      // If bust, end turn automatically
+      // TODO: Add check for BUST here
 
       console.log(
         `Player ${socket.id} in room ${roomId} rolled: `,
-        roomState.dice,
-        `(Roll ${roomState.rollCount})`
+        currentState.dice,
+        `(Roll ${currentState.rollCount})`
       );
 
+      // Save the final updated state *to Redis*
+      await saveGameState(roomId, currentState); // <-- Save updated state
       // Broadcast the final updated state *to the room*
-      io.to(roomId).emit("gameStateUpdate", roomState);
+      io.to(roomId).emit("gameStateUpdate", currentState);
     }, 1000); // 1 second delay to match client animation duration
   });
 
-  socket.on("keepDice", (index: number) => {
-    // Use the stored roomId from socket data
+  socket.on("keepDice", async (index: number) => {
     const roomId = (socket.data as SocketData).roomId;
-    if (!roomId || !rooms[roomId]) {
+    if (!roomId) {
       console.error(
-        `Cannot keep dice: Socket ${socket.id} not in a valid room.`
+        `Cannot keep dice: Socket ${socket.id} not associated with a room.`
       );
       return;
     }
-    const roomState = rooms[roomId];
 
+    const roomState = await getGameState(roomId); // <-- Get from Redis
+    if (!roomState) {
+      console.error(
+        `Cannot keep dice: Room ${roomId} not found for socket ${socket.id}.`
+      );
+      socket.emit("error", {
+        message: "Game room data not found. Please rejoin.",
+      });
+      return;
+    }
     if (socket.id !== roomState.currentPlayer) {
       console.log(
         `Player ${socket.id} tried to keep dice out of turn in room ${roomId}.`
@@ -349,10 +463,6 @@ io.on("connection", (socket: Socket) => {
       return;
     }
 
-    // TODO: Add validation here: Can the selected die actually be kept?
-    // This requires scoring logic to know if the die (or combination it forms) is valid.
-    // For now, we allow keeping any die that has been rolled.
-
     const wasKept = roomState.keptDice[index];
     roomState.keptDice[index] = !wasKept; // Toggle keep status
 
@@ -361,10 +471,6 @@ io.on("connection", (socket: Socket) => {
       roomState.mustKeepDie = false;
     } else {
       // If a die was un-kept, check if any *other* dice are still kept from this roll.
-      // If not, the player must keep a die again.
-      // This requires knowing which dice were kept *before* this specific toggle.
-      // This simple toggle might be insufficient. We might need separate "selected" vs "locked" states.
-      // For now, let's stick to the simpler logic: un-keeping requires re-keeping *something*.
       const anyDieKept = roomState.keptDice.some((kept) => kept);
       if (!anyDieKept) {
         roomState.mustKeepDie = true;
@@ -375,16 +481,29 @@ io.on("connection", (socket: Socket) => {
       `Player ${socket.id} in room ${roomId} toggled keep for die index ${index}:`,
       roomState.keptDice
     );
+    // Save the updated state *to Redis*
+    await saveGameState(roomId, roomState); // <-- Save updated state
     // Broadcast the updated state *to the room*
     io.to(roomId).emit("gameStateUpdate", roomState);
   });
 
-  socket.on("joinRoom", (roomId: string, playerName: string) => {
-    if (!rooms[roomId]) {
-      // Handle invalid room ID
+  socket.on("joinRoom", async (roomId: string, playerName: string) => {
+    let roomState = await getGameState(roomId); // <-- Get from Redis
+
+    // Retry logic: If room not found, wait briefly and try again
+    if (!roomState) {
+      console.log(
+        `Room ${roomId} not found initially for ${socket.id}. Retrying once after delay...`
+      );
+      await new Promise((resolve) => setTimeout(resolve, 250)); // Wait 250ms
+      roomState = await getGameState(roomId); // Try fetching again
+    }
+
+    if (!roomState) {
+      // Handle invalid room ID after retry
       socket.emit("error", { message: "Room not found" });
       console.log(
-        `Socket ${socket.id} tried to join non-existent room ${roomId}`
+        `Socket ${socket.id} tried to join non-existent room ${roomId} (even after retry)`
       );
       return;
     }
@@ -393,7 +512,6 @@ io.on("connection", (socket: Socket) => {
     socket.join(roomId);
 
     // Add player to the room's state using the provided name
-    const roomState = rooms[roomId];
     const safePlayerName = playerName?.trim()
       ? playerName.trim()
       : `Player_${socket.id.substring(0, 4)}`; // Sanitize and provide default
@@ -417,35 +535,48 @@ io.on("connection", (socket: Socket) => {
     // If this is the first player joining this specific room, make it their turn
     if (!roomState.currentPlayer) {
       roomState.currentPlayer = socket.id;
-      resetTurnState(roomId); // Initialize dice/roll count for the first turn in this room
+      resetTurnState(roomState); // Pass state directly
     }
 
     console.log(
       `Socket ${socket.id} (${safePlayerName}) joined room ${roomId}`
     );
 
+    // Save the updated state *to Redis*
+    await saveGameState(roomId, roomState);
+
     // Send the current room state to the newly joined client
     socket.emit("gameStateUpdate", roomState);
 
-    // Broadcast the updated room state (specifically player list) to everyone in the room
-    io.to(roomId).emit("gameStateUpdate", roomState); // Send full state for simplicity
+    // Broadcast the updated room state to everyone in the room
+    io.to(roomId).emit("gameStateUpdate", roomState); // Send full state
 
     // Store the room ID on the socket data
     socket.data = { ...socket.data, roomId: roomId };
   });
 
-  // Add play again event handler
-  socket.on("playAgain", () => {
+  // Make playAgain handler async for Redis operations
+  socket.on("playAgain", async () => {
     const roomId = socket.data.roomId;
-    if (!roomId || !rooms[roomId]) {
+    if (!roomId) {
       console.error(
-        `Cannot start new round: Socket ${socket.id} not in a valid room.`
+        `Cannot start new round: Socket ${socket.id} not associated with a room.`
       );
+      return;
+    }
+    // Fetch state first to check if round has ended
+    const roomState = await getGameState(roomId);
+    if (!roomState) {
+      console.error(
+        `Cannot start new round: Room ${roomId} not found for socket ${socket.id}.`
+      );
+      socket.emit("error", {
+        message: "Game room data not found. Please rejoin.",
+      });
       return;
     }
 
     // Only allow initiating a new round if the current round has ended
-    const roomState = rooms[roomId];
     if (!roomState.roundEnded) {
       console.log(
         `Player ${socket.id} tried to start a new round before the current one ended in room ${roomId}.`
@@ -453,26 +584,40 @@ io.on("connection", (socket: Socket) => {
       return;
     }
 
-    // Start a new round
-    startNewRound(roomId);
+    // Start a new round (startNewRound now saves state internally)
+    await startNewRound(roomId); // <-- Await the async helper
     console.log(`New round started in room ${roomId}`);
 
-    // Broadcast the updated state to the room
-    io.to(roomId).emit("gameStateUpdate", roomState);
+    // Fetch the latest state after startNewRound to broadcast
+    const updatedState = await getGameState(roomId);
+    if (updatedState) {
+      // Broadcast the updated state to the room
+      io.to(roomId).emit("gameStateUpdate", updatedState);
+    } else {
+      console.error(`Room ${roomId} vanished after starting new round?`);
+    }
   });
 
-  // Update endTurn to track round progress and detect round end
-  socket.on("endTurn", () => {
-    // Use the stored roomId from socket data
+  // Make endTurn handler async for Redis operations
+  socket.on("endTurn", async () => {
     const roomId = socket.data.roomId;
-    if (!roomId || !rooms[roomId]) {
+    if (!roomId) {
       console.error(
-        `Cannot end turn: Socket ${socket.id} not in a valid room.`
+        `Cannot end turn: Socket ${socket.id} not associated with a room.`
       );
       return;
     }
-    const roomState = rooms[roomId];
 
+    const roomState = await getGameState(roomId); // <-- Get from Redis
+    if (!roomState) {
+      console.error(
+        `Cannot end turn: Room ${roomId} not found for socket ${socket.id}.`
+      );
+      socket.emit("error", {
+        message: "Game room data not found. Please rejoin.",
+      });
+      return;
+    }
     if (socket.id !== roomState.currentPlayer) {
       console.log(
         `Player ${socket.id} tried to end turn out of turn in room ${roomId}.`
@@ -501,7 +646,12 @@ io.on("connection", (socket: Socket) => {
       }
     }
 
-    roomState.scores[socket.id] += turnScore;
+    // Ensure scores object exists before assignment
+    if (!roomState.scores) roomState.scores = {};
+    if (!roomState.roundScores) roomState.roundScores = {};
+
+    roomState.scores[socket.id] =
+      (roomState.scores[socket.id] || 0) + turnScore;
     roomState.roundScores[socket.id] = turnScore; // Track round-specific score
     console.log(
       `Player ${
@@ -512,14 +662,16 @@ io.on("connection", (socket: Socket) => {
     );
     // --- End Scoring Logic ---
 
-    // Mark this player as having played this round
-    roomState.playersPlayedThisRound.add(socket.id);
+    // Mark this player as having played this round (add to array if not present)
+    if (!roomState.playersPlayedThisRound.includes(socket.id)) {
+      roomState.playersPlayedThisRound.push(socket.id);
+    }
 
-    // Check if the round has ended (all players have played)
-    const roundEnded = checkRoundEnd(roomId);
+    // Check if the round has ended
+    const roundEnded = checkRoundEnd(roomState); // Pass state directly
     if (roundEnded) {
       // Determine the round winner
-      const roundWinner = determineRoundWinner(roomId);
+      const roundWinner = determineRoundWinner(roomState); // Pass state directly
       roomState.roundEnded = true;
       roomState.roundWinner = roundWinner;
 
@@ -527,23 +679,31 @@ io.on("connection", (socket: Socket) => {
         `Round ended in room ${roomId}. Winner: ${roundWinner || "Tie"}`
       );
 
+      // Save state before broadcasting round end
+      await saveGameState(roomId, roomState); // <-- Save state
       // Broadcast the updated state with round end information
       io.to(roomId).emit("gameStateUpdate", roomState);
       return;
     }
 
     // If the round hasn't ended, advance to the next player in the room
-    const nextPlayer = getNextPlayer(roomId);
+    const nextPlayer = getNextPlayer(roomState); // Pass state directly
     roomState.currentPlayer = nextPlayer;
     if (nextPlayer) {
-      resetTurnState(roomId);
+      resetTurnState(roomState); // Pass state directly
       console.log(`Turn advanced to player ${nextPlayer} in room ${roomId}`);
     } else {
+      // This case should ideally not happen if round end is checked correctly,
+      // but handle defensively.
       roomState.currentPlayer = null;
-      console.log(`Last player finished turn in room ${roomId}.`);
-      // Optionally delete room or declare winner
+      console.log(
+        `Error: No next player found, but round not ended in room ${roomId}.`
+      );
+      // Consider resetting the round or logging more info.
     }
 
+    // Save the updated state *to Redis*
+    await saveGameState(roomId, roomState); // <-- Save state
     // Broadcast the updated state *to the room*
     io.to(roomId).emit("gameStateUpdate", roomState);
   });
