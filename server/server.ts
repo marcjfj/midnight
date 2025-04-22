@@ -300,10 +300,18 @@ app.post("/api/create-room", async (req, res) => {
 app.use(express.static(path.join(__dirname, "../../client/dist")));
 
 io.on("connection", (socket: Socket) => {
-  console.log("a user connected:", socket.id);
+  console.log(`[connection] New connection established: ${socket.id}`);
+
+  // Catch-all listener for debugging
+  socket.onAny((eventName, ...args) => {
+    console.log(
+      `[socket.onAny] Socket ${socket.id} received event: ${eventName} with args:`,
+      args
+    );
+  });
 
   socket.on("disconnect", async () => {
-    console.log("user disconnected:", socket.id);
+    console.log(`[disconnect] User disconnected: ${socket.id}`);
 
     // Use the stored roomId from socket data
     const roomId = (socket.data as SocketData).roomId;
