@@ -56,7 +56,8 @@ console.log(
 
 const redis = new Redis(redisUrl);
 // Create a duplicate Redis client for the Socket.IO adapter
-const redisForSocketIO = new Redis(redisUrl);
+const redisPublisher = new Redis(redisUrl);
+const redisSubscriber = new Redis(redisUrl);
 
 redis.on("connect", () => {
   console.log("[Redis] Successfully connected to Redis");
@@ -79,9 +80,25 @@ redis.on("connect", () => {
     });
 });
 
+redisPublisher.on("connect", () => {
+  console.log("[Redis] Publisher client connected");
+});
+
+redisSubscriber.on("connect", () => {
+  console.log("[Redis] Subscriber client connected");
+});
+
 redis.on("error", (err) => {
   console.error("[Redis] Redis connection error:", err);
   // Consider how to handle runtime errors - maybe attempt reconnect or shutdown gracefully
+});
+
+redisPublisher.on("error", (err) => {
+  console.error("[Redis] Publisher client error:", err);
+});
+
+redisSubscriber.on("error", (err) => {
+  console.error("[Redis] Subscriber client error:", err);
 });
 // --- End Redis Initialization ---
 
@@ -91,7 +108,23 @@ const io = new Server(server, {
     origin: "*", // Allow all origins for now, restrict in production
     methods: ["GET", "POST"],
   },
-  adapter: createAdapter(redis, redisForSocketIO),
+  pingTimeout: 60000, // 60 seconds
+  pingInterval: 25000, // 25 seconds
+  connectTimeout: 45000, // 45 seconds
+  adapter: createAdapter(redisPublisher, redisSubscriber, {
+    key: "socket.io", // Optionally customize the Redis key prefix
+    requestsTimeout: 5000, // Increase timeout for adapter requests
+  }),
+});
+
+// Set up adapter error handlers
+io.of("/").adapter.on("error", (error) => {
+  console.error("[Socket.IO Adapter] Redis adapter error:", error);
+});
+
+// Log when adapter is ready
+io.of("/").adapter.on("ready", () => {
+  console.log("[Socket.IO Adapter] Redis adapter is ready");
 });
 
 console.log(
@@ -618,6 +651,12 @@ io.on("connection", (socket: Socket) => {
         }`
       );
 
+      // Also check if room exists in Socket.IO adapter
+      const roomExists = await new Promise<boolean>((resolve) => {
+        io.of("/").adapter.rooms.get(roomId) ? resolve(true) : resolve(false);
+      });
+      console.log(`[joinRoom] Room exists in Socket.IO adapter: ${roomExists}`);
+
       if (directCheck === 0) {
         // If key doesn't exist, try to check when it was last seen
         const ttl = await redis.ttl(`room:${roomId}`);
@@ -657,12 +696,12 @@ io.on("connection", (socket: Socket) => {
     let roomState = await getGameState(roomId); // <-- Get from Redis
 
     // Enhanced retry logic: Try up to 3 times with increasing delays
-    const MAX_RETRIES = 3;
+    const MAX_RETRIES = 5; // Increased from 3 to 5
     let retryCount = 0;
 
     while (!roomState && retryCount < MAX_RETRIES) {
       retryCount++;
-      const delayMs = retryCount * 1000; // 1s, 2s, 3s
+      const delayMs = retryCount * 1000; // 1s, 2s, 3s...
 
       console.log(
         `[joinRoom] Room ${roomId} not found for ${socket.id}. Retry ${retryCount}/${MAX_RETRIES} after ${delayMs}ms delay...`
@@ -687,8 +726,33 @@ io.on("connection", (socket: Socket) => {
       console.error(
         `[joinRoom] Room ${roomId} still not found for ${socket.id} after ${MAX_RETRIES} retries. Emitting error.`
       );
-      socket.emit("error", { message: "Room not found" });
-      return;
+
+      // Last attempt - check if another server instance created it but didn't sync yet
+      try {
+        // Explicitly try to join the socket.io room even without state
+        socket.join(roomId);
+        console.log(
+          `[joinRoom] Socket ${socket.id} joined Socket.IO room anyway: ${roomId}`
+        );
+
+        // Try to create a basic empty state for this room
+        const emergencyState = createInitialGameState();
+        await saveGameState(roomId, emergencyState);
+        console.log(`[joinRoom] Created emergency state for room: ${roomId}`);
+
+        // Emit message about recovery
+        io.to(roomId).emit(
+          "systemMessage",
+          "Room data was recovered after an issue. Some game state may have been reset."
+        );
+
+        // Continue with the newly created state
+        roomState = emergencyState;
+      } catch (err) {
+        console.error(`[joinRoom] Recovery attempt failed:`, err);
+        socket.emit("error", { message: "Room not found" });
+        return;
+      }
     }
 
     console.log(

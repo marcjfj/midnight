@@ -43,7 +43,15 @@ export const initialGameState: GameState = {
 
 // Connect to the Socket.IO server (Keep this connection logic here or lift higher if needed)
 const SERVER_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:3001";
-const socket = socketIOClient(SERVER_URL);
+const socket = socketIOClient(SERVER_URL, {
+  reconnection: true,
+  reconnectionAttempts: 5,
+  reconnectionDelay: 1000,
+  reconnectionDelayMax: 5000,
+  timeout: 20000,
+  autoConnect: true,
+  transports: ["websocket", "polling"],
+});
 
 function App() {
   const [isConnected, setIsConnected] = useState(socket.connected);
@@ -141,15 +149,15 @@ function Home() {
         // Store roomId in localStorage for debugging purposes
         localStorage.setItem("lastCreatedRoomId", roomId);
 
-        // Add a small delay to ensure Redis has processed the room creation fully
+        // Add a delay to ensure Redis has processed the room creation fully
         console.log(
-          `[handleCreateRoom] Waiting 1 second before navigating to ensure Redis processing completes...`
+          `[handleCreateRoom] Waiting 3 seconds before navigating to ensure Redis processing completes...`
         );
         setTimeout(() => {
           // Navigate to the new room URL
           console.log(`[handleCreateRoom] Navigating to /room/${roomId}`);
           navigate(`/room/${roomId}`);
-        }, 1000); // 1 second delay
+        }, 3000); // 3 second delay to ensure Redis replication
       } else {
         throw new Error("Failed to get room ID from server");
       }

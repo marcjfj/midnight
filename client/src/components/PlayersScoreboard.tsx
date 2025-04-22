@@ -8,7 +8,8 @@ interface Player {
 interface PlayersScoreboardProps {
   players: Record<string, Player>;
   scores: Record<string, number>;
-  currentPlayerId: string | null;
+  roundScores: Record<string, number>;
+  currentPlayer: string | null;
   myPlayerId: string | null;
   roomId?: string; // Optional room ID to create shareable link
 }
@@ -16,7 +17,8 @@ interface PlayersScoreboardProps {
 const PlayersScoreboard: React.FC<PlayersScoreboardProps> = ({
   players,
   scores,
-  currentPlayerId,
+  roundScores,
+  currentPlayer,
   myPlayerId,
   roomId,
 }) => {
@@ -93,7 +95,7 @@ const PlayersScoreboard: React.FC<PlayersScoreboardProps> = ({
           sortedPlayerIds.map((id) => {
             const player = players[id];
             const score = scores[id] ?? 0;
-            const isCurrent = id === currentPlayerId;
+            const isCurrent = id === currentPlayer;
             const isMe = id === myPlayerId;
 
             return (

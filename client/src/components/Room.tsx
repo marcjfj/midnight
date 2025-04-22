@@ -60,6 +60,7 @@ function Room({ socket }: RoomProps) {
   const [playerName, setPlayerName] = useState<string | null>(null);
   const [isNameSet, setIsNameSet] = useState<boolean>(false); // Track if name process is complete
   const [showNamePrompt, setShowNamePrompt] = useState<boolean>(false);
+  const [systemMessage, setSystemMessage] = useState<string | null>(null);
   const previousRollCountRef = useRef<number>(gameState.rollCount); // Ref to track previous roll count
   const myPlayerId = socket.id; // Store myPlayerId outside useEffect
   const previousIsMyTurnRef = useRef<boolean>(false); // Ref to track if it was my turn *before* state update
@@ -151,9 +152,21 @@ function Room({ socket }: RoomProps) {
       console.error(`[socketError] Socket error for room ${roomId}:`, error);
     }
 
+    // System message handler
+    function onSystemMessage(message: string) {
+      console.log(`[systemMessage] Received system message: ${message}`);
+      setSystemMessage(message);
+
+      // Auto-hide system message after 10 seconds
+      setTimeout(() => {
+        setSystemMessage(null);
+      }, 10000);
+    }
+
     // Set up listeners before joining
     socket.on("gameStateUpdate", onGameStateUpdate);
     socket.on("error", onError);
+    socket.on("systemMessage", onSystemMessage);
 
     // Emit event to join the room
     console.log(
@@ -166,6 +179,7 @@ function Room({ socket }: RoomProps) {
       console.log(`[joinEffect] Leaving room: ${roomId}`);
       socket.off("gameStateUpdate", onGameStateUpdate);
       socket.off("error", onError);
+      socket.off("systemMessage", onSystemMessage);
       // Optionally emit a 'leaveRoom' event if needed by the server
       // socket.emit("leaveRoom", roomId);
     };
@@ -265,19 +279,17 @@ function Room({ socket }: RoomProps) {
     );
   }
 
-  // 2. Show joining/loading state AFTER name is set but BEFORE game state is received and processed
-  // Use !hasJoined check here
-  if (!hasJoined && isNameSet) {
+  // 2. Show loading state if player name is set but not yet joined
+  if (isNameSet && !hasJoined) {
     return (
       <div className="flex flex-col items-center justify-center h-full space-y-4 p-8">
-        <div className="animate-pulse text-2xl text-purple-400 font-bold">
-          Midnight
+        <div className="text-2xl text-purple-400 font-bold mb-4">Midnight</div>
+        <div className="bg-gray-800/80 border border-purple-500 rounded-lg p-8 max-w-sm w-full text-center shadow-lg shadow-purple-500/20">
+          <p className="text-lg">Connecting to game room...</p>
+          <div className="mt-4 w-full flex justify-center">
+            <div className="w-8 h-8 border-t-2 border-purple-500 rounded-full animate-spin"></div>
+          </div>
         </div>
-        {/* Display name during joining */}
-        <p className="text-xl">
-          Joining room: {roomId} as {playerName}...
-        </p>
-        <div className="w-16 h-16 border-4 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
       </div>
     );
   }
@@ -323,7 +335,39 @@ function Room({ socket }: RoomProps) {
   // Use hasJoined check here
   if (hasJoined) {
     return (
-      <div className="w-full max-w-6xl mx-auto h-full flex flex-col">
+      <div className="w-full max-w-4xl mx-auto">
+        {/* Room ID display */}
+        <div className="bg-gray-800/50 px-4 py-2 rounded mb-4 flex justify-between items-center">
+          <div>
+            Room: <span className="text-purple-400 font-mono">{roomId}</span>
+          </div>
+          <button
+            onClick={() => {
+              navigator.clipboard.writeText(window.location.href);
+            }}
+            className="text-sm text-gray-400 hover:text-white"
+          >
+            Copy Link
+          </button>
+        </div>
+
+        {/* System message banner */}
+        {systemMessage && (
+          <div className="bg-yellow-800/80 border border-yellow-500 text-yellow-200 px-4 py-2 rounded mb-4 text-center">
+            {systemMessage}
+          </div>
+        )}
+
+        {/* Player scoreboard */}
+        <PlayersScoreboard
+          players={gameState.players}
+          scores={gameState.scores}
+          roundScores={gameState.roundScores}
+          currentPlayer={gameState.currentPlayer}
+          myPlayerId={myPlayerId}
+          roomId={roomId}
+        />
+
         {/* Round Winner Announcement */}
         {gameState.roundEnded && (
           <div className="w-full mb-6 p-6 border border-yellow-500 rounded-lg bg-gray-800/80 shadow-lg shadow-yellow-500/20 flex flex-col items-center">
@@ -430,7 +474,8 @@ function Room({ socket }: RoomProps) {
             <PlayersScoreboard
               players={gameState.players}
               scores={gameState.scores}
-              currentPlayerId={gameState.currentPlayer}
+              roundScores={gameState.roundScores}
+              currentPlayer={gameState.currentPlayer}
               myPlayerId={myPlayerId}
               roomId={roomId}
             />
