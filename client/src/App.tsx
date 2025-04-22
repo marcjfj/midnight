@@ -118,6 +118,7 @@ function Home() {
     setError(null);
     try {
       // Use fetch to call the backend API endpoint
+      console.log("[handleCreateRoom] Sending request to create room...");
       const response = await fetch("/api/create-room", {
         // Ensure proxy is set up in vite.config.ts or use full URL
         method: "POST",
@@ -134,14 +135,19 @@ function Home() {
       const roomId = data.roomId;
 
       if (roomId) {
-        console.log(`Room created: ${roomId}, navigating...`);
+        console.log(
+          `[handleCreateRoom] Room created: ${roomId}, storing in localStorage for debugging...`
+        );
+        // Store roomId in localStorage for debugging purposes
+        localStorage.setItem("lastCreatedRoomId", roomId);
         // Navigate to the new room URL
+        console.log(`[handleCreateRoom] Navigating to /room/${roomId}`);
         navigate(`/room/${roomId}`);
       } else {
         throw new Error("Failed to get room ID from server");
       }
     } catch (err: any) {
-      console.error("Error creating room:", err);
+      console.error("[handleCreateRoom] Error creating room:", err);
       setError(err.message || "Failed to create room. Please try again.");
       setCreatingRoom(false);
     }

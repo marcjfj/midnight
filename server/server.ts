@@ -51,16 +51,41 @@ const PORT = process.env.PORT || 3001;
 // Render provides the connection string via REDIS_URL
 const redisUrl = process.env.REDIS_URL;
 if (!redisUrl) {
-  console.error("REDIS_URL environment variable not set!");
+  console.error("[Redis] REDIS_URL environment variable not set!");
   process.exit(1); // Exit if Redis isn't configured
 }
+console.log(
+  `[Redis] Attempting to connect to Redis with URL: ${redisUrl.replace(
+    /redis:\/\/.*@/,
+    "redis://****@"
+  )}`
+);
+
 const redis = new Redis(redisUrl);
 
 redis.on("connect", () => {
-  console.log("Connected to Redis");
+  console.log("[Redis] Successfully connected to Redis");
+
+  // Test Redis connection by writing and reading a test key
+  redis
+    .set("test:connection", "success")
+    .then(() => redis.get("test:connection"))
+    .then((value) => {
+      if (value === "success") {
+        console.log("[Redis] Redis read/write test successful");
+      } else {
+        console.error(
+          `[Redis] Redis read/write test failed. Expected 'success', got '${value}'`
+        );
+      }
+    })
+    .catch((err) => {
+      console.error("[Redis] Redis read/write test failed with error:", err);
+    });
 });
+
 redis.on("error", (err) => {
-  console.error("Redis connection error:", err);
+  console.error("[Redis] Redis connection error:", err);
   // Consider how to handle runtime errors - maybe attempt reconnect or shutdown gracefully
 });
 // --- End Redis Initialization ---
@@ -72,27 +97,44 @@ redis.on("error", (err) => {
 // Helper function to get game state from Redis
 async function getGameState(roomId: string): Promise<GameState | null> {
   console.log(`[getGameState] Attempting to get state for room: ${roomId}`);
-  const stateString = await redis.get(`room:${roomId}`); // Use prefix for clarity
-  if (!stateString) {
-    console.log(`[getGameState] No state found in Redis for room: ${roomId}`);
-    return null;
-  }
-  console.log(`[getGameState] Found state string for room: ${roomId}`);
   try {
-    const state = JSON.parse(stateString) as GameState;
-    // Ensure playersPlayedThisRound is always an array (handles potential old data)
-    state.playersPlayedThisRound = state.playersPlayedThisRound || [];
-    console.log(`[getGameState] Successfully parsed state for room: ${roomId}`);
-    return state;
-  } catch (error) {
-    console.error(
-      `[getGameState] Failed to parse state for room ${roomId}:`,
-      error
+    const stateString = await redis.get(`room:${roomId}`); // Use prefix for clarity
+    if (!stateString) {
+      console.log(`[getGameState] No state found in Redis for room: ${roomId}`);
+      return null;
+    }
+    console.log(
+      `[getGameState] Found state string for room: ${roomId} with length: ${stateString.length}`
     );
-    console.error(`[getGameState] Corrupted state string: ${stateString}`);
-    // Decide how to handle corruption, e.g., delete the key?
-    // await deleteGameState(roomId);
-    return null; // Return null if parsing fails
+    try {
+      const state = JSON.parse(stateString) as GameState;
+      // Ensure playersPlayedThisRound is always an array (handles potential old data)
+      state.playersPlayedThisRound = state.playersPlayedThisRound || [];
+      console.log(
+        `[getGameState] Successfully parsed state for room: ${roomId}`
+      );
+      return state;
+    } catch (parseError) {
+      console.error(
+        `[getGameState] Failed to parse state for room ${roomId}:`,
+        parseError
+      );
+      console.error(
+        `[getGameState] Corrupted state string: ${stateString.substring(
+          0,
+          200
+        )}...`
+      );
+      // Decide how to handle corruption, e.g., delete the key?
+      // await deleteGameState(roomId);
+      return null; // Return null if parsing fails
+    }
+  } catch (redisError) {
+    console.error(
+      `[getGameState] Redis error when getting room ${roomId}:`,
+      redisError
+    );
+    return null; // Return null on Redis errors
   }
 }
 
@@ -279,9 +321,23 @@ app.post("/api/create-room", async (req, res) => {
       `[/api/create-room] Attempting to save initial state for room: ${roomId}`
     );
     await saveGameState(roomId, initialState); // <-- Save to Redis
+
+    // Verify the room was actually saved by trying to read it back
+    const verifyState = await getGameState(roomId);
+    if (verifyState) {
+      console.log(
+        `[/api/create-room] Successfully verified room in Redis: ${roomId}`
+      );
+    } else {
+      console.error(
+        `[/api/create-room] CRITICAL ERROR: Room ${roomId} created but not readable from Redis!`
+      );
+    }
+
     console.log(
       `[/api/create-room] Successfully saved initial state for room: ${roomId}`
     );
+    console.log(`[/api/create-room] Sending roomId to client: ${roomId}`);
     res.json({ roomId }); // Send the new room ID back to the client
   } catch (error) {
     // Log the specific error from saveGameState if it throws
@@ -540,6 +596,19 @@ io.on("connection", (socket: Socket) => {
     console.log(
       `[joinRoom] User ${socket.id} attempting to join room: ${roomId} as ${playerName}`
     );
+
+    // Log all currently available rooms in Redis (for debugging only)
+    try {
+      const roomsKeys = await redis.keys("room:*");
+      console.log(
+        `[joinRoom] DEBUG: Currently available Redis room keys (${roomsKeys.length}):`
+      );
+      for (const key of roomsKeys) {
+        console.log(`[joinRoom] DEBUG: Available room - ${key}`);
+      }
+    } catch (err) {
+      console.error(`[joinRoom] Error listing Redis keys:`, err);
+    }
 
     // --- Initial Fetch ---
     console.log(`[joinRoom] Attempting initial fetch for room: ${roomId}`);

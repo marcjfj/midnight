@@ -81,7 +81,7 @@ function Room({ socket }: RoomProps) {
   useEffect(() => {
     if (!isNameSet || !roomId || !playerName) {
       // Don't connect or join until name is set and roomId is available
-      console.log("Join effect dependency not ready:", {
+      console.log("[joinEffect] Join effect dependency not ready:", {
         isNameSet,
         roomId,
         playerName,
@@ -90,14 +90,30 @@ function Room({ socket }: RoomProps) {
     }
 
     if (!roomId) {
-      console.error("No room ID found in URL");
+      console.error("[joinEffect] No room ID found in URL");
       // Handle this error, maybe navigate back to home?
       return;
     }
 
+    // Compare with last created room ID for debugging
+    const lastCreatedRoomId = localStorage.getItem("lastCreatedRoomId");
+    if (lastCreatedRoomId) {
+      console.log(
+        `[joinEffect] Comparing roomIds - URL: ${roomId}, Last created: ${lastCreatedRoomId}`
+      );
+      if (roomId !== lastCreatedRoomId) {
+        console.warn(
+          `[joinEffect] WARNING: Room ID mismatch! URL roomId (${roomId}) != Last created roomId (${lastCreatedRoomId})`
+        );
+      }
+    }
+
     // Listener for game state updates specifically for this room
     function onGameStateUpdate(newState: GameState) {
-      console.log(`GameState Update Received for room ${roomId}:`, newState);
+      console.log(
+        `[onGameStateUpdate] GameState Update Received for room ${roomId}:`,
+        newState
+      );
 
       // Auto-keep last die logic
       const myTurn = newState.currentPlayer === myPlayerId;
@@ -130,17 +146,26 @@ function Room({ socket }: RoomProps) {
       previousIsMyTurnRef.current = newState.currentPlayer === myPlayerId; // Update previous turn status *after* processing
     }
 
-    // Set up listener before joining
+    // Error handler
+    function onError(error: any) {
+      console.error(`[socketError] Socket error for room ${roomId}:`, error);
+    }
+
+    // Set up listeners before joining
     socket.on("gameStateUpdate", onGameStateUpdate);
+    socket.on("error", onError);
 
     // Emit event to join the room
-    console.log(`Attempting to join room: ${roomId} as ${playerName}`);
+    console.log(
+      `[joinEffect] Attempting to join room: ${roomId} as ${playerName}`
+    );
     socket.emit("joinRoom", roomId, playerName); // Send name when joining
 
     // Clean up the listener when the component unmounts or roomId changes
     return () => {
-      console.log(`Leaving room: ${roomId}`);
+      console.log(`[joinEffect] Leaving room: ${roomId}`);
       socket.off("gameStateUpdate", onGameStateUpdate);
+      socket.off("error", onError);
       // Optionally emit a 'leaveRoom' event if needed by the server
       // socket.emit("leaveRoom", roomId);
     };
